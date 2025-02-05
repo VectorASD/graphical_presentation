@@ -4,6 +4,7 @@ from random import randint
 from itertools import chain
 import numpy as np # pip install numpy
 from time import time
+from hashlib import sha256
 
 # https://formats.kaitai.io/bmp/python.html
 # https://entropymine.com/jason/bmpsuite/bmpsuite/html/bmpsuite.html
@@ -14,7 +15,7 @@ def f_unpack(file, format):
 
 # calcsize("<IHHIIiiHHIIIIII") -> 52 (без magic!)
 
-HeaderTypes = {
+HeaderTypes = { # без учёта magic и file_header
     12: "bitmap_core_header",
     40: "bitmap_info_header",
     52: "bitmap_v2_info_header",
@@ -284,32 +285,233 @@ def lab_5(_in, out, scale):
 
 
 
+def lab_6(_in, watermark, out, settings):
+    def watermark_getter():
+        # watermark
+        header, palette, matrix = reader(watermark, bin_palette = True)
+        _, _, _, _, _, W, H, _, bitperpixel, _, _, _, _, _, _ = header
+
+        assert bitperpixel == 8
+
+        scale_x = W / w_width
+        scale_y = H / w_height
+        W_padded = (W + 3) // 4 * 4 # 0 = 0 | 1,2,3,4 = 4 | 5,6,7,8 = 8...
+
+        int2bytes = tuple(bytes((i,)) for i in range(256))
+        return scale_x, scale_y, lambda x, y: palette[matrix[x + y * W_padded]]
+
+    # main
+    header, _, matrix = reader(_in)
+    _, _, _, _, _, W, H, _, bitperpixel, _, _, _, _, _, _ = header
+
+    assert bitperpixel == 24
+
+    margin, w_width, w_height, up, left, alpha = settings
+    left = margin if left else W - w_width - margin
+    top = H - w_height - margin if up else margin
+
+    scale_x, scale_y, get = watermark_getter()
 
 
-in_name = os.path.join("orig", "CAT256.BMP")
-in_name2 = os.path.join("orig", "_сarib_TC.bmp")
-in_name3 = os.path.join("orig", "CAT16.bmp")
 
-parser(in_name3)
+    write = out.write
+    write(b"BM")
+    write(pack("<IHHIIiiHHIIIIII", *header))
+
+    W_padded_2 = (W + 3) // 4 * 4
+    W_pad = b"\0" * (W_padded_2 - W)
+    inv_alpha = 1 - alpha
+
+    for y in range(H):
+        yW = y * W_padded_2
+        for x in range(W):
+            pos = (yW + x) * 3
+            color = matrix[pos : pos + 3]
+            if x >= left and y >= top:
+                wx, wy = x - left, y - top
+                if wx < w_width and wy < w_height:
+                    r, g, b = color
+                    r2, g2, b2 = get(int(wx * scale_x), int(wy * scale_y))
+                    color = bytes((int(r * inv_alpha + r2 * alpha), int(g * inv_alpha + g2 * alpha), int(b * inv_alpha + b2 * alpha)))
+            write(color)
+            #print(x, y, "|", get(x, y))
+        write(W_pad)
+
+
+
+def reader_2b(file, matrix_size):
+    L = os.stat(file.name).st_size
+    pad_size = matrix_size // 4 - L - 37
+    assert pad_size >= 0 # чтобы гарантировать, что всё влезет, либо оно вообще не примется за работу
+
+    digester = sha256()
+    for i in range(L):
+        num, = byte = file.read(1)
+        digester.update(byte)
+        yield num >> 6
+        yield num >> 4 & 3
+        yield num >> 2 & 3
+        yield num & 3
+    # pad = b"\0" * pad_size больше палится, если все - нули
+    pad = bytes(randint(0, 255) for i in range(pad_size))
+    append = b"".join((pad, digester.digest(), pack("<I", L), b"\1"))
+    for num in append:
+        yield num >> 6
+        yield num >> 4 & 3
+        yield num >> 2 & 3
+        yield num & 3
+
+def reader_4b(file, matrix_size):
+    L = os.stat(file.name).st_size
+    pad_size = matrix_size // 2 - L - 37
+    assert pad_size >= 0
+
+    digester = sha256()
+    for i in range(L):
+        num, = byte = file.read(1)
+        digester.update(byte)
+        yield num >> 4 & 15
+        yield num & 15
+    pad = bytes(randint(0, 255) for i in range(pad_size))
+    append = b"".join((pad, digester.digest(), pack("<I", L), b"\2"))
+    for num in append:
+        yield num >> 4 & 15
+        yield num & 15
+
+def reader_6b(file, matrix_size):
+    L = os.stat(file.name).st_size
+    pad_size = matrix_size * 3 // 4 - L - 37
+    assert pad_size >= 0
+
+    digester = sha256()
+    for i in range((L + 2) // 3):
+        bytez = file.read(3)
+        try: b1, b2, b3 = bytez
+        except ValueError:
+            b1, b2, b3 = bytez[0], (bytez[1] if len(bytez) == 2 else 0), 0
+        digester.update(bytez)
+        num = b1 << 16 | b2 << 8 | b3
+        yield num >> 18
+        yield num >> 12 & 63
+        yield num >> 6 & 63
+        yield num & 63
+    pad = bytes(randint(0, 255) for i in range(pad_size))
+    append = b"".join((pad, digester.digest(), pack("<I", L), b"\3"))
+    for i in range(0, len(append) + 2, 3):
+        bytez = append[i : i + 3]
+        try: b1, b2, b3 = bytez
+        except ValueError:
+            b1, b2, b3 = bytez[0], (bytez[1] if len(bytez) == 2 else 0), 0
+        num = b1 << 16 | b2 << 8 | b3
+        yield num >> 18
+        yield num >> 12 & 63
+        yield num >> 6 & 63
+        yield num & 63
+
+def lab_7(_in, out, file, mode):
+    #   структура файла (size b.):
+    # полезная нагрузка (L b.)
+    # паддинг (size-L-37 b.)
+    # sha256 (32 b.)
+    # размер полезной нагрузки (4 b.)
+    # режим (1 b.)
+
+    header, palette, matrix = reader(_in)
+    f_size, rez1, rez2, bm_offset, h_size, W, H, planes, bitperpixel, compression, sizeimage, x_res, y_res, clr_used, clr_imp = header
+
+    assert bitperpixel == 24
+    assert mode in (2, 4, 6)
+
+    if mode == 2:
+        # print(len(bytes(bit_reader))) # равно len(matrix), т.е. 1440000
+        # print(max(bytes(bit_reader))) # равно 3, т.к. это максималка для двух битов
+        bit_reader = iter(reader_2b(file, len(matrix)))
+        matrix = bytes((byte & 0xfc | next(bit_reader) for byte in matrix))
+    elif mode == 4:
+        bit_reader = iter(reader_4b(file, len(matrix)))
+        matrix = bytes((byte & 0xf0 | next(bit_reader) for byte in matrix))
+    else: # mode == 6
+        bit_reader = iter(reader_6b(file, len(matrix)))
+        matrix = bytes((byte & 0xc0 | next(bit_reader) for byte in matrix))
+
+    write = out.write
+    write(b"BM")
+    write(pack("<IHHIIiiHHIIIIII", *header))
+    write(matrix)
+
+
+
+def unpacker_2b(matrix):
+    L = len(matrix) // 4
+    mat = iter(matrix)
+    result = bytearray(L)
+    for i in range(L):
+        b1, b2, b3, b4 = next(mat), next(mat), next(mat), next(mat)
+        result[i] = (b1 & 3) << 6 | (b2 & 3) << 4 | (b3 & 3) << 2 | b4 & 3
+    return result
+
+def unpacker_4b(matrix):
+    L = len(matrix) // 2
+    mat = iter(matrix)
+    result = bytearray(L)
+    for i in range(L):
+        b1, b2 = next(mat), next(mat)
+        result[i] = (b1 & 15) << 4 | b2 & 15
+    return result
+
+def unpacker_6b(matrix):
+    L = len(matrix) * 3 // 4
+    mat = iter(matrix)
+    result = bytearray(L)
+    for i in range(0, L, 3):
+        b1, b2, b3, b4 = next(mat), next(mat), next(mat), next(mat)
+        num = (b1 & 63) << 18 | (b2 & 63) << 12 | (b3 & 63) << 6 | b4 & 63
+        result[i] = num >> 16
+        result[i + 1] = num >> 8 & 255
+        result[i + 2] = num & 255
+    return result
+
+def lab_7_2(_in, out):
+    header, palette, matrix = reader(_in)
+    f_size, rez1, rez2, bm_offset, h_size, W, H, planes, bitperpixel, compression, sizeimage, x_res, y_res, clr_used, clr_imp = header
+
+    shift = len(matrix) - len(matrix) // 4 * 4
+    assert bitperpixel == 24
+    mode = matrix[-1 - shift] & 3
+    assert mode
+
+    file = (None, unpacker_2b, unpacker_4b, unpacker_6b)[mode](matrix)
+
+    hash = file[-37:-5]
+    size = unpack("<I", file[-5:-1])[0]
+    assert file[-1] == mode
+
+    data = file[:size]
+    assert sha256(data).digest() == hash, "Неверный sha256-digest"
+    out.write(data)
+
+
+
+
 
 def solve_1():
-    with open(in_name, "rb") as _in:
+    with open(cat256, "rb") as _in:
         with open("gray_cat.bmp", "wb") as out:
             lab_1(_in, out)
 
 def solve_2():
-    with open(in_name, "rb") as _in:
+    with open(cat256, "rb") as _in:
         with open("border.bmp", "wb") as out:
             lab_2(_in, out)
-    with open(in_name2, "rb") as _in:
+    with open(carib, "rb") as _in:
         with open("border2.bmp", "wb") as out:
             lab_2(_in, out)
 
 def solve_3():
-    with open(in_name, "rb") as _in:
+    with open(cat256, "rb") as _in:
         with open("rotate.bmp", "wb") as out:
             lab_3(_in, out)
-    with open(in_name2, "rb") as _in:
+    with open(carib, "rb") as _in:
         with open("rotate2.bmp", "wb") as out:
             lab_3(_in, out)
 
@@ -343,7 +545,7 @@ def solve_4():
 
     anti_gc = []
 
-    for name in (in_name, in_name2, in_name3):
+    for name in (cat256, carib, cat16):
         T = time()
         with open(name, "rb") as _in:
             lab_4(_in, canvas_maker)
@@ -354,14 +556,90 @@ def solve_4():
     root.mainloop()
 
 def solve_5():
-    with open(in_name, "rb") as _in:
+    with open(cat256, "rb") as _in:
         for i, scale in enumerate((0.1, 0.25, 0.5, 1, 2, 4, 10)):
             _in.seek(0)
             with open(f"scale{i}_{scale}.bmp", "wb") as out:
                 lab_5(_in, out, scale)
 
-solve_1()
-solve_2()
-solve_3()
+def solve_6():
+    margin = 8
+    width = height = 256
+    alpha = 0.6 # непрозрачность именно водяного знака
+    up = False
+    left = False
+    settings  = margin, width, height, up, left, alpha
+
+    with open(carib, "rb") as _in:
+        with open(cat256, "rb") as watermark:
+            with open("watermarked.bmp", "wb") as out:
+                lab_6(_in, watermark, out, settings)
+        _in.seek(0)
+
+        settings = margin, width, height, False, True, alpha
+        with open(favicon, "rb") as watermark:
+            with open("watermarked2.bmp", "wb") as out:
+                lab_6(_in, watermark, out, settings)
+        _in.seek(0)
+
+        settings = margin, width, height, True, False, alpha
+        with open(favicon2, "rb") as watermark:
+            with open("watermarked3.bmp", "wb") as out:
+                lab_6(_in, watermark, out, settings)
+
+def solve_7():
+    # внутри carib 800x600x3 байтов, т.е. 1440000. 1440000 / 1024**2 = 1.37 Мб, что и подтверждает win10:explorer.exe
+    # ещё и фактический размер файла 1440054, из которых 54 байта: magic (2b) + file_header (12b) + info_header (40b)
+    # 25%: 360000 байтов
+    # 50%: 720000 байтов
+    # 75%: 1080000 байтов
+
+    with open(carib, "rb") as _in:
+        with open("steganography_2.bmp", "wb") as out:
+            with open(secret_360k, "rb") as file:
+                lab_7(_in, out, file, 2)
+        _in.seek(0)
+
+        with open("steganography_4.bmp", "wb") as out:
+            with open(secret_720k, "rb") as file:
+                lab_7(_in, out, file, 4)
+        _in.seek(0)
+
+        with open("steganography_6.bmp", "wb") as out:
+            with open(secret_1080k, "rb") as file:
+                lab_7(_in, out, file, 6)
+
+def solve_7_2():
+    names = secret_360k, secret_720k, secret_1080k
+    for i in (2, 4, 6):
+        with open(f"steganography_{i}.bmp", "rb") as _in:
+            with open(names[i // 2 - 1], "wb") as out:
+                lab_7_2(_in, out)
+
+
+
+
+
+cat256 = os.path.join("orig", "CAT256.BMP")
+carib = os.path.join("orig", "_сarib_TC.bmp")
+cat16 = os.path.join("orig", "CAT16.bmp")
+favicon = os.path.join("orig", "favicon.bmp")
+favicon2 = os.path.join("orig", "favicon2.bmp")
+secret_360k = os.path.join("orig", "steganography_360k.7z")
+secret_720k = os.path.join("orig", "steganography_720k.7z")
+secret_1080k = os.path.join("orig", "steganography_1080k.7z")
+
+parser(favicon)
+
+# solve_1()
+# solve_2()
+# solve_3()
 # solve_4()
-solve_5()
+# solve_5()
+# solve_6()
+# solve_7()
+solve_7_2()
+
+size = 89527 - 817 # для 360k
+size = 46247 - 800 - 15 # для 370k
+# with open(r"D:\Meow\Desktop\Учёба\ПГИ\orig\random", "wb") as file: file.write(bytes(randint(0, 255) for i in range(size)))
