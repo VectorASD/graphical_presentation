@@ -2,7 +2,6 @@ from struct import unpack, pack, calcsize
 import os
 from random import randint
 from itertools import chain
-import numpy as np # pip install numpy
 from time import time
 from hashlib import sha256
 
@@ -517,7 +516,8 @@ def solve_3():
 
 def solve_4():
     from tkinter import Tk, Canvas
-    from PIL import Image, ImageTk # pip install Pillow
+    from PIL import Image, ImageTk # pip install Pillow (только для преобразования numpy-матрицы в холст!)
+    import numpy as np # pip install numpy
 
     root_W = root_H = 0
     border = 2
