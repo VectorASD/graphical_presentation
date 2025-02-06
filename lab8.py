@@ -107,28 +107,36 @@ def lab_8(_in, canvas_maker):
     assert bits_per_pixel == 8
     assert EGA_palette == (b"\0\0\0",) * 16 # смысл в ней, если есть VGA? Потому здесь нули
 
-    put_pixel, ready = canvas_maker(W, H)
+    put_pixel = canvas_maker(W, H)
     for y in range(H):
         for x in range(W):
             put_pixel(x, y, VGA_palette[matrix[y][x]])
-    ready()
 
 
 
-def solve_8():
+def canvas_printer(solve):
     from tkinter import Tk, Canvas
     from PIL import Image, ImageTk # pip install Pillow (только для преобразования numpy-матрицы в холст!)
     import numpy as np # pip install numpy
 
-    root_W = root_H = 0
+    anti_gc = []
+    cells = []
     border = 2
-    def canvas_maker(W, H):
-        nonlocal root_W, root_H
-        root_W += W + border * 2
-        root_H = max(root_H, H + border * 2)
+    last_ready = None
+    def canvas_maker(W, H, columns = 2):
+        nonlocal last_ready
+
+        for i in range(10):
+            row, column = divmod(i, columns)
+            if len(cells) <= row or len(cells[row]) <= column: break
+        cell = W + border * 2, H + border * 2
+        while len(cells) <= row: cells.append([])
+        while len(cells[row]) <= column: cells[row].append(None)
+        cells[row][column] = cell
+        # print("CELL:", row, column, cells)
 
         canvas = Canvas(root, bg = "black", width = W, height = H)
-        canvas.grid(row = 0, column = len(anti_gc))
+        canvas.grid(row = row, column = column)
 
         H_m1 = H - 1
         matrix = np.zeros((H, W, 3), dtype=np.uint8)
@@ -141,13 +149,26 @@ def solve_8():
             img = ImageTk.PhotoImage(image = Image.fromarray(matrix))
             canvas.create_image((W / 2 + border - 0.5, H / 2 + border - 0.5), image=img, state="normal")
             anti_gc.append(img) # иначе мусоросборщик (gc) съест все PhotoImage, кроме последней из-за перезаписей 'img' перменной
-        return put_pixel, ready
+        if last_ready is not None: last_ready()
+        last_ready = ready
+        return put_pixel
 
-    root = Tk()
-    root.title("VectorASD")
+    root = None
 
-    anti_gc = []
+    def wrap():
+        nonlocal root
+        root = Tk()
+        root.title("VectorASD")
 
+        solve(canvas_maker)
+        if last_ready is not None: last_ready()
+
+        # root.geometry(f"{root_W}x{root_H}") оказывается, всё это время по умолчанию оно выставляло нужный мне результат O_o
+        root.mainloop()
+    return wrap
+
+@canvas_printer
+def solve_8(canvas_maker):
     for name in (cat256, _200001):
         T = time()
         with open(name, "rb") as _in:
@@ -155,8 +176,7 @@ def solve_8():
         td = time() - T
         print(f"Время загрузки {name !r}: {round(td, 3)} sec.")
 
-    root.geometry(f"{root_W}x{root_H}")
-    root.mainloop()
+
 
 
 
