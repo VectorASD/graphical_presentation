@@ -79,9 +79,9 @@ def parser(file):
     assert compression == "rgb", "Остальные компрессии пока не поддерживаются"
 
 def filter(color):
-    R = color & 255
+    B = color & 255
     G = color >> 8 & 255
-    B = color >> 16 & 255
+    R = color >> 16 & 255
     gray = round(R * 0.3 + G * 0.59 + B * 0.11)
     return gray | gray << 8 | gray << 16
 
